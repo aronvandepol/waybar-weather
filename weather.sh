@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Waybar Weather Module Script
 # Displays current weather and 3-day forecast
-# Uses wttr.in API for weather data
+# Uses wttr.in JSON API for accurate forecast data
 
 set -euo pipefail
 
@@ -15,9 +15,6 @@ CITY="Leiden"
 # Language code (ko=Korean, en=English, ja=Japanese, etc.)
 # See: https://github.com/chubin/wttr.in#supported-languages
 LANG="en"
-
-# Metric units: m2 uses Celsius and m/s for wind
-UNITS="m2"
 
 # Tooltip labels (customize for your language)
 LABEL_NOW="Now"
@@ -53,43 +50,71 @@ TODAY="$(get_day_name $day_num_today)"
 TOMORROW="$(get_day_name $day_num_tomorrow)"
 DAYAFTER="$(get_day_name $day_num_after)"
 
-# Single curl call for all weather data
-# Format: bar|location|condition|temp|feels|wind|rain|humidity|pressure|today|tomorrow|dayafter
-weather_data="$(curl -4 -fsS "https://wttr.in/${CITY}?${UNITS}&lang=${LANG}&format=%c%t|%l|%C|%t|%f|%w|%p|%h|%P|%c+%t|{1%c+%t}|{2%c+%t}" 2>/dev/null || echo " --°C|Unknown|N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A|N/A")"
+# Fetch JSON data for accurate forecasts
+json="$(curl -4 -fsS "https://wttr.in/${CITY}?format=j1&lang=${LANG}" 2>/dev/null)" || {
+    echo '{"text":" --°C","tooltip":"Weather unavailable"}'
+    exit 0
+}
 
-# Split the data
-IFS='|' read -r bar location condition temp feels wind rain humidity pressure today tomorrow dayafter <<< "$weather_data"
+# Current conditions
+current_temp="$(echo "$json" | jq -r '.current_condition[0].temp_C')"
+current_feels="$(echo "$json" | jq -r '.current_condition[0].FeelsLikeC')"
+current_desc="$(echo "$json" | jq -r ".current_condition[0].lang_${LANG}[0].value // .current_condition[0].weatherDesc[0].value")"
+current_icon="$(echo "$json" | jq -r '.current_condition[0].weatherCode')"
+wind="$(echo "$json" | jq -r '.current_condition[0].windspeedKmph')km/h"
+wind_dir="$(echo "$json" | jq -r '.current_condition[0].winddir16Point')"
+humidity="$(echo "$json" | jq -r '.current_condition[0].humidity')%"
+pressure="$(echo "$json" | jq -r '.current_condition[0].pressure')hPa"
+precip="$(echo "$json" | jq -r '.current_condition[0].precipMM')mm"
+location="$(echo "$json" | jq -r '.nearest_area[0].areaName[0].value')"
 
-# Clean up the forecast entries (remove leading numbers from {N...} format)
-tomorrow="$(echo "$tomorrow" | sed 's/^[0-9]//g')"
-dayafter="$(echo "$dayafter" | sed 's/^[0-9]//g')"
+# Forecast data
+today_avg="$(echo "$json" | jq -r '.weather[0].avgtempC')"
+today_icon="$(echo "$json" | jq -r '.weather[0].hourly[4].weatherCode')"
+tomorrow_avg="$(echo "$json" | jq -r '.weather[1].avgtempC')"
+tomorrow_icon="$(echo "$json" | jq -r '.weather[1].hourly[4].weatherCode')"
+dayafter_avg="$(echo "$json" | jq -r '.weather[2].avgtempC')"
+dayafter_icon="$(echo "$json" | jq -r '.weather[2].hourly[4].weatherCode')"
 
-# Remove + signs from temperatures (keep only - for negatives)
-bar="$(echo "$bar" | sed 's/+//g')"
-temp="$(echo "$temp" | sed 's/+//g')"
-feels="$(echo "$feels" | sed 's/+//g')"
-today="$(echo "$today" | sed 's/+//g')"
-tomorrow="$(echo "$tomorrow" | sed 's/+//g')"
-dayafter="$(echo "$dayafter" | sed 's/+//g')"
+# Map weather codes to icons
+get_icon() {
+    case $1 in
+        113) echo "☀️" ;;
+        116) echo "⛅" ;;
+        119|122) echo "☁️" ;;
+        143|248|260) echo "🌫️" ;;
+        176|263|266|293|296|353) echo "🌦️" ;;
+        179|182|185|281|284|311|314|317|350|377) echo "🌨️" ;;
+        200|386|389|392|395) echo "⛈️" ;;
+        227|230) echo "❄️" ;;
+        299|302|305|308|356|359) echo "🌧️" ;;
+        320|323|326|329|332|335|338|368|371|374) echo "🌨️" ;;
+        *) echo "🌡️" ;;
+    esac
+}
+
+bar_icon="$(get_icon $current_icon)"
+today_emoji="$(get_icon $today_icon)"
+tomorrow_emoji="$(get_icon $tomorrow_icon)"
+dayafter_emoji="$(get_icon $dayafter_icon)"
+
+# Build bar text
+bar="${bar_icon} ${current_temp}°C"
 
 # Build tooltip
 tip="$(cat <<EOF
 $location
 ━━━━━━━━━━━━━━━━━━━━━━
-${LABEL_NOW}: $condition
-${LABEL_TEMP}: $temp | ${LABEL_FEELS}: $feels
-${LABEL_WIND}: $wind | ${LABEL_RAIN}: $rain
-${LABEL_HUMIDITY}: $humidity | ${LABEL_PRESSURE}: $pressure
+${LABEL_NOW}: $current_desc
+${LABEL_TEMP}: ${current_temp}°C | ${LABEL_FEELS}: ${current_feels}°C
+${LABEL_WIND}: ${wind_dir} ${wind} | ${LABEL_RAIN}: ${precip}
+${LABEL_HUMIDITY}: ${humidity} | ${LABEL_PRESSURE}: ${pressure}
 
 ━━━━━━━━━━━━━━━━━━━━━━
-$TODAY     $today
-$TOMORROW   $tomorrow
-$DAYAFTER  $dayafter
+$TODAY     ${today_emoji}  ${today_avg}°C
+$TOMORROW   ${tomorrow_emoji}  ${tomorrow_avg}°C
+$DAYAFTER  ${dayafter_emoji}  ${dayafter_avg}°C
 EOF
 )"
 
-# Clean up extra spaces
-bar="$(echo "$bar" | sed 's/  / /g')"
-
-# Output JSON for waybar
 jq -nc --arg text "$bar" --arg tooltip "$tip" '{text: $text, tooltip: $tooltip}'
